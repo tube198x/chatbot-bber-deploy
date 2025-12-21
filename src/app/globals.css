@@ -1,0 +1,23 @@
+:root{
+  --bber-cyan: #0BAAE7;
+  --bber-green: #0EA256;
+  --bber-bg: #EAFBFF;
+  --bber-card: #FFFFFF;
+  --bber-text: #0B1B2A;
+  --bber-muted: rgba(11, 27, 42, 0.65);
+  --bber-border: rgba(11, 27, 42, 0.12);
+}
+
+html, body{
+  height: 100%;
+}
+
+body{
+  margin: 0;
+  color: var(--bber-text);
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  background:
+    radial-gradient(900px 500px at 20% 10%, rgba(11,170,231,0.18), transparent 60%),
+    radial-gradient(700px 450px at 90% 20%, rgba(14,162,86,0.14), transparent 60%),
+    linear-gradient(180deg, var(--bber-bg), #FFFFFF);
+}
