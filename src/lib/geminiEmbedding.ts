@@ -1,21 +1,29 @@
+import fetch from "node-fetch";
+
+const API_KEY = process.env.GEMINI_API_KEY!;
+const MODEL = process.env.GEMINI_EMBED_MODEL || "text-embedding-004";
+
 export async function geminiEmbed(text: string): Promise<number[]> {
-  const apiKey = process.env.GEMINI_API_KEY!;
-  const model = process.env.GEMINI_EMBED_MODEL || "text-embedding-004";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${apiKey}`;
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content: { parts: [{ text }] } }),
-  });
-
-  if (!resp.ok) throw new Error(await resp.text());
-
-  const data: any = await resp.json();
-  const values = data?.embedding?.values;
-
-  if (!Array.isArray(values) || values.length !== 768) {
-    throw new Error(`Embedding dimension mismatch. Got ${values?.length}`);
+  if (!text || text.trim().length < 5) {
+    throw new Error("Text too short for embedding");
   }
-  return values as number[];
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:embedContent?key=${API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: { parts: [{ text }] }
+      })
+    }
+  );
+
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Gemini embed error: ${t}`);
+  }
+
+  const json: any = await res.json();
+  return json.embedding.values;
 }

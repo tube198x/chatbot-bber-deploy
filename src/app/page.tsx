@@ -1,596 +1,1002 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React from "react";
 
-type SuggestItem = {
-  id: string;
-  cau_hoi: string;
-  nhom: string | null;
-  score: number | null;
-};
+type Attachment = { name: string; path: string; url?: string };
+type Suggestion = { id: string; cau_hoi: string; nhom?: string | null };
+type Scope = "internal" | "gemini" | "groq";
 
-type AskResponse =
-  | {
-      mode: "faq" | "ai" | "fallback";
-      answer: string;
-      matched?: { id: string; cau_hoi: string; nhom?: string | null; score?: number | null } | null;
-    }
-  | any;
-
-type ChatMsg = {
-  id: string;
-  role: "bot" | "user";
+type Msg = {
+  role: "user" | "assistant";
   text: string;
-  meta?: { mode?: string; nhom?: string | null; score?: number | null } | null;
+  scope: Scope;
+  attachments?: Attachment[];
+  suggestions?: Suggestion[];
 };
 
-function uid() {
-  return Math.random().toString(16).slice(2) + Date.now().toString(16);
+const LOGO_SRC = "/logo.ico";
+const INTERNAL_PLACEHOLDER = "Gõ 2 ký tự trở lên để hiện gợi ý (Tra cứu nội bộ Trường).";
+
+function safeTrim(s: any) {
+  return String(s ?? "").trim();
 }
 
-function normalizeQ(q: string) {
-  return q.trim().replace(/\s+/g, " ");
+function escapeRegExp(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function useDebouncedValue<T>(value: T, delayMs: number) {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(value), delayMs);
-    return () => clearTimeout(t);
-  }, [value, delayMs]);
-  return debounced;
+function highlightParts(text: string, query: string) {
+  const q = safeTrim(query).toLowerCase();
+  if (!q) return [{ t: text, hit: false }];
+
+  // token đơn giản (client)
+  const tokens = q
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .split(/\s+/)
+    .filter((x) => x.length >= 2)
+    .slice(0, 6);
+
+  if (!tokens.length) return [{ t: text, hit: false }];
+
+  const re = new RegExp(`(${tokens.map(escapeRegExp).join("|")})`, "ig");
+  const parts = text.split(re);
+  return parts
+    .filter((p) => p.length > 0)
+    .map((p) => ({
+      t: p,
+      hit: tokens.some((tk) => p.toLowerCase() === tk.toLowerCase()),
+    }));
+}
+
+async function readJsonOrText(res: Response): Promise<{ json?: any; text?: string }> {
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    const json = await res.json().catch(() => null);
+    return { json };
+  }
+  const text = await res.text().catch(() => "");
+  return { text };
+}
+
+function labelOf(scope: Scope) {
+  if (scope === "internal") return "Tra cứu nội bộ Trường";
+  if (scope === "gemini") return "Tra cứu AI (Tổng hợp)";
+  return "Tra cứu AI (Nhanh)";
+}
+
+const HEADER_RE =
+  /^\s*(Tiêu đề|Các bước|Nội dung|Công thức\/Ký hiệu|Ví dụ minh hoạ|Ví dụ minh họa)\s*:/im;
+
+function hasStructured(text: string) {
+  return HEADER_RE.test(String(text || ""));
+}
+
+function parseStructured(text: string) {
+  const raw = String(text || "");
+  const lines = raw.split(/\r?\n/);
+  const sections: { title: string; lines: string[] }[] = [];
+  let cur: { title: string; lines: string[] } | null = null;
+
+  const isHeader = (l: string) =>
+    /^\s*(Tiêu đề|Các bước|Nội dung|Công thức\/Ký hiệu|Ví dụ minh hoạ|Ví dụ minh họa)\s*:/i.test(l);
+
+  for (const line0 of lines) {
+    const line = line0.replace(/\s+$/g, "");
+    if (!line.trim()) continue;
+
+    if (isHeader(line)) {
+      const t = line.split(":")[0].trim();
+      cur = { title: t, lines: [] };
+      sections.push(cur);
+      const rest = line.slice(line.indexOf(":") + 1).trim();
+      if (rest) cur.lines.push(rest);
+      continue;
+    }
+
+    if (!cur) {
+      cur = { title: "Nội dung", lines: [] };
+      sections.push(cur);
+    }
+    cur.lines.push(line);
+  }
+
+  return sections;
+}
+
+function renderSection(sec: { title: string; lines: string[] }) {
+  const title = sec.title.toLowerCase();
+
+  if (title.includes("các bước")) {
+    const items = sec.lines
+      .map((x) => x.replace(/^\s*(?:b\d+\)|b\d+\.|\d+\)|\d+\.|-\s*|•\s*|\*\s*)/i, "").trim())
+      .filter(Boolean);
+
+    return (
+      <ol className="bber-ol">
+        {items.map((it, idx) => (
+          <li key={idx}>{it}</li>
+        ))}
+      </ol>
+    );
+  }
+
+  if (title.includes("công thức")) {
+    return (
+      <div className="bber-formula">
+        {sec.lines.map((l, idx) => (
+          <div key={idx} className="bber-formulaLine">
+            {l}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (title.includes("ví dụ")) {
+    return (
+      <div className="bber-example">
+        {sec.lines.map((l, idx) => (
+          <div key={idx} className="bber-exampleLine">
+            {l.replace(/^\s*[-•]\s*/, "")}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="bber-paras">
+      {sec.lines.map((l, idx) => (
+        <div key={idx} className="bber-para">
+          {l}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CollapsibleText({ text, maxChars = 900 }: { text: string; maxChars?: number }) {
+  const [open, setOpen] = React.useState(false);
+  const t = String(text || "");
+
+  if (t.length <= maxChars) return <div style={{ whiteSpace: "pre-wrap" }}>{t}</div>;
+
+  return (
+    <div>
+      <div style={{ whiteSpace: "pre-wrap" }}>{open ? t : t.slice(0, maxChars).trimEnd() + "…"}</div>
+      <button className="bber-miniBtn" onClick={() => setOpen((v) => !v)}>
+        {open ? "Thu gọn" : "Xem thêm"}
+      </button>
+    </div>
+  );
 }
 
 export default function Page() {
-  // ====== quick chips (đề xuất) ======
-  const quickChips = useMemo(
-    () => [
-      { label: "Học phí", q: "Thời hạn đóng học phí học kỳ 1 là khi nào?" },
-      { label: "Thời khóa biểu", q: "Cho tôi tra cứu thời khóa biểu theo lớp." },
-      { label: "Thủ tục nhập học", q: "Thủ tục nhập học cần những giấy tờ gì?" },
-      { label: "Ký túc xá", q: "Đăng ký ký túc xá như thế nào?" },
-      { label: "Miễn giảm", q: "Điều kiện miễn giảm học phí gồm những gì?" },
-      { label: "Liên hệ", q: "Số điện thoại và nơi liên hệ phòng công tác HSSV?" },
-    ],
-    []
-  );
+  const [scope, setScope] = React.useState<Scope>("internal");
+  const [theme, setTheme] = React.useState<"light" | "dark">("light");
 
-  // ====== state ======
-  const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
-  const [suggestMode, setSuggestMode] = useState<"semantic" | "keyword" | "off">("semantic");
-  const [suggestions, setSuggestions] = useState<SuggestItem[]>([]);
-  const [showSuggest, setShowSuggest] = useState(true);
-
-  const [messages, setMessages] = useState<ChatMsg[]>([
-    {
-      id: uid(),
-      role: "bot",
-      text: "Xin chào tôi là trợ lý ảo Bber, tôi có thể giúp gì cho bạn ?",
-      meta: { mode: "faq" },
-    },
+  const [messages, setMessages] = React.useState<Msg[]>([
+    { role: "assistant", text: "Xin chào, tôi là trợ lý ảo Bber. Tôi có thể giúp gì cho bạn?", scope: "internal" },
   ]);
 
-  // ====== refs ======
-  const endRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [input, setInput] = React.useState("");
+  const [loading, setLoading] = React.useState(false);
+  const [loadingText, setLoadingText] = React.useState("Đang xử lý…");
 
-  // ====== responsive helper ======
-  const isClient = typeof window !== "undefined";
-  const [isMobile, setIsMobile] = useState(false);
-  useEffect(() => {
-    const calc = () => setIsMobile(window.innerWidth <= 768);
-    calc();
-    window.addEventListener("resize", calc);
-    return () => window.removeEventListener("resize", calc);
+  const [typingItems, setTypingItems] = React.useState<Suggestion[]>([]);
+  const [typingOpen, setTypingOpen] = React.useState(false);
+
+  const [speechSupported, setSpeechSupported] = React.useState(false);
+  const [listening, setListening] = React.useState(false);
+  const recogRef = React.useRef<any>(null);
+
+  const [clientId, setClientId] = React.useState<string>("");
+  const [aiRemaining, setAiRemaining] = React.useState<number>(5);
+
+  const listRef = React.useRef<HTMLDivElement | null>(null);
+
+  const placeholder = scope === "internal" ? INTERNAL_PLACEHOLDER : "Nhập câu hỏi…";
+
+  React.useEffect(() => {
+    // client id theo "phiên tab" (sessionStorage): đúng yêu cầu "mỗi lần truy cập"
+    try {
+      const key = "bber_client_id";
+      let cid = sessionStorage.getItem(key) || "";
+      if (!cid) {
+        cid = (crypto?.randomUUID?.() || `cid_${Date.now()}_${Math.random().toString(16).slice(2)}`).slice(0, 64);
+        sessionStorage.setItem(key, cid);
+      }
+      setClientId(cid);
+    } catch {
+      setClientId(`cid_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+    }
   }, []);
 
-  // ====== auto scroll ======
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length, sending]);
+  React.useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages.length, loading]);
 
-  // ====== suggestions (debounced) ======
-  const debouncedInput = useDebouncedValue(input, 250);
-
-  useEffect(() => {
-    const q = normalizeQ(debouncedInput);
-    if (!showSuggest || suggestMode === "off") {
-      setSuggestions([]);
+  React.useEffect(() => {
+    const saved = (localStorage.getItem("bber_theme") || "").toLowerCase();
+    if (saved === "dark" || saved === "light") {
+      setTheme(saved as any);
+      document.documentElement.dataset.theme = saved;
       return;
     }
+    const isDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+    const t = isDark ? "dark" : "light";
+    setTheme(t);
+    document.documentElement.dataset.theme = t;
+  }, []);
+
+  function toggleTheme() {
+    const t = theme === "dark" ? "light" : "dark";
+    setTheme(t);
+    localStorage.setItem("bber_theme", t);
+    document.documentElement.dataset.theme = t;
+  }
+
+  // Suggest (debounce + cache ở server)
+  React.useEffect(() => {
+    if (scope !== "internal") {
+      setTypingItems([]);
+      setTypingOpen(false);
+      return;
+    }
+
+    const q = input.trim();
     if (q.length < 2) {
-      setSuggestions([]);
+      setTypingItems([]);
+      setTypingOpen(false);
       return;
     }
 
-    let aborted = false;
-    (async () => {
+    const t = setTimeout(async () => {
       try {
-        const r = await fetch(`/api/suggest?q=${encodeURIComponent(q)}`, { method: "GET" });
-        if (!r.ok) return;
-        const data = await r.json();
-        if (aborted) return;
-
-        // data: { mode: "semantic"/"keyword", suggestions: [...] }
-        const items: SuggestItem[] = Array.isArray(data?.suggestions) ? data.suggestions : [];
-        setSuggestions(items.slice(0, 6));
+        const res = await fetch(`/api/suggest?q=${encodeURIComponent(q)}`, {
+          headers: clientId ? { "x-bber-client-id": clientId } : {},
+        });
+        const { json } = await readJsonOrText(res);
+        const items = Array.isArray(json?.items) ? (json.items as Suggestion[]) : [];
+        setTypingItems(items);
+        setTypingOpen(items.length > 0);
       } catch {
-        // ignore
+        setTypingItems([]);
+        setTypingOpen(false);
       }
-    })();
+    }, 260);
 
-    return () => {
-      aborted = true;
-    };
-  }, [debouncedInput, showSuggest, suggestMode]);
+    return () => clearTimeout(t);
+  }, [input, scope, clientId]);
 
-  // ====== send question ======
-  async function sendQuestion(qRaw: string) {
-    const q = normalizeQ(qRaw);
-    if (!q) return;
-
-    setSending(true);
-    setSuggestions([]); // ẩn gợi ý khi gửi
-    setShowSuggest(false);
-
-    const userMsg: ChatMsg = { id: uid(), role: "user", text: q };
-    setMessages((prev) => [...prev, userMsg]);
-
-    try {
-      const r = await fetch("/api/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q }),
-      });
-
-      const data: AskResponse = await r.json().catch(() => ({}));
-      const answerText =
-        typeof data?.answer === "string" && data.answer.trim()
-          ? data.answer.trim()
-          : "Xin lỗi, hiện tại Bber chưa trả lời được. Bạn có thể thử hỏi lại theo cách khác.";
-
-      const mode = typeof data?.mode === "string" ? data.mode : "fallback";
-
-      const botMsg: ChatMsg = {
-        id: uid(),
-        role: "bot",
-        text: answerText,
-        meta: {
-          mode,
-          nhom: data?.matched?.nhom ?? null,
-          score: data?.matched?.score ?? null,
-        },
-      };
-
-      setMessages((prev) => [...prev, botMsg]);
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: uid(),
-          role: "bot",
-          text: "Không kết nối được máy chủ. Bạn kiểm tra mạng và thử lại.",
-          meta: { mode: "error" },
-        },
-      ]);
-    } finally {
-      setSending(false);
-      setShowSuggest(true);
-      setInput("");
-      inputRef.current?.focus();
+  // Voice input
+  React.useEffect(() => {
+    const w = window as any;
+    const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
+    if (!SR) {
+      setSpeechSupported(false);
+      return;
     }
-  }
+    setSpeechSupported(true);
 
-  function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (sending) return;
-    sendQuestion(input);
-  }
+    const rec = new SR();
+    rec.lang = "vi-VN";
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
 
-  function onPickSuggestion(item: SuggestItem) {
-    // click gợi ý: gửi luôn (đúng yêu cầu “click gợi ý để trả lời nhanh”)
-    if (sending) return;
-    sendQuestion(item.cau_hoi);
-  }
+    rec.onresult = (ev: any) => {
+      const t = ev?.results?.[0]?.[0]?.transcript || "";
+      if (t) setInput((prev) => (prev ? `${prev} ${t}` : t));
+    };
+    rec.onerror = () => setListening(false);
+    rec.onend = () => setListening(false);
 
-  function onPickChip(q: string) {
-    if (sending) return;
-    sendQuestion(q);
+    recogRef.current = rec;
+  }, []);
+
+  function toggleVoice() {
+    const rec = recogRef.current;
+    if (!rec) return;
+    try {
+      if (listening) {
+        rec.stop();
+        setListening(false);
+      } else {
+        rec.start();
+        setListening(true);
+      }
+    } catch {
+      setListening(false);
+    }
   }
 
   function clearChat() {
-    setMessages([
-      {
-        id: uid(),
-        role: "bot",
-        text: "Xin chào tôi là trợ lý ảo Bber, tôi có thể giúp gì cho bạn ?",
-        meta: { mode: "faq" },
-      },
-    ]);
+    setMessages([{ role: "assistant", text: "Xin chào, tôi là trợ lý ảo Bber. Tôi có thể giúp gì cho bạn?", scope }]);
     setInput("");
-    setSuggestions([]);
-    inputRef.current?.focus();
+    setTypingItems([]);
+    setTypingOpen(false);
   }
 
-  // ====== layout widths: mobile full; desktop 1/3 ======
-  const shellWidth = isMobile ? "100%" : "34%"; // ~1/3
-  const shellMinWidth = isMobile ? "100%" : "420px";
-  const shellMaxWidth = isMobile ? "100%" : "520px";
+  async function copyToClipboard(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+  }
+
+  async function send(text?: string) {
+    const q = safeTrim(text ?? input);
+    if (!q || loading) return;
+
+    setTypingOpen(false);
+    setTypingItems([]);
+
+    setMessages((m) => [...m, { role: "user", text: q, scope }]);
+    setInput("");
+
+    const isInternal = scope === "internal";
+    setLoading(true);
+    setLoadingText(isInternal ? "Đang tìm trong dữ liệu nội bộ…" : "Đang tạo câu trả lời AI…");
+
+    try {
+      const endpoint = isInternal ? "/api/ask" : "/api/ai";
+      const payload = isInternal ? { question: q, scope: "internal" } : { question: q, provider: scope };
+
+      const r = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(clientId ? { "x-bber-client-id": clientId } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+
+      // AI quota header
+      const rem = r.headers.get("x-ai-remaining");
+      if (rem != null && rem !== "") {
+        const n = Number(rem);
+        if (!Number.isNaN(n)) setAiRemaining(n);
+      }
+
+      const { json, text: rawText } = await readJsonOrText(r);
+
+      if (!r.ok) {
+        const errMsg =
+          safeTrim(json?.error) || safeTrim(json?.message) || safeTrim(json?.answer) || safeTrim(rawText) || "Có lỗi.";
+        throw new Error(errMsg);
+      }
+
+      const answer = safeTrim(json?.answer) || "Xin lỗi, tôi chưa có thông tin phù hợp.";
+      const attachments = Array.isArray(json?.attachments) ? (json.attachments as Attachment[]) : undefined;
+      const suggestions = Array.isArray(json?.suggestions) ? (json.suggestions as Suggestion[]) : undefined;
+
+      setMessages((m) => [...m, { role: "assistant", text: answer, scope, attachments, suggestions }]);
+    } catch (e: any) {
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", text: `Có lỗi xảy ra: ${safeTrim(e?.message) || "Không xác định"}`, scope },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
-    <div className="bber-bg">
-      <div className="bber-top">
-        <div className="bber-brand">
-          <img className="bber-logo" src="/bber-logo.ico" alt="Bber" />
-          <div>
-            <div className="bber-title">Bber</div>
-            <div className="bber-sub">Trợ lý ảo HSSV · Gợi ý khi gõ · Ưu tiên FAQ</div>
-          </div>
-        </div>
+    <div className="bber-root">
+      <link rel="preconnect" href="https://fonts.googleapis.com" />
+      <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
+      <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap" rel="stylesheet" />
 
-        <div className="bber-actions">
-          <button className="bber-btn" type="button" onClick={() => setSuggestMode((m) => (m === "off" ? "semantic" : "off"))}>
-            {suggestMode === "off" ? "Bật gợi ý" : "Tắt gợi ý"}
-          </button>
-          <button className="bber-btn bber-btn-ghost" type="button" onClick={clearChat}>
-            Xóa hội thoại
-          </button>
-        </div>
-      </div>
+      <style jsx global>{`
+        :root {
+          --bber-bg1: #d8fefb;
+          --bber-bg2: #8be8f5;
+          --bber-brand: #0aabe8;
 
-      <div className="bber-shell" style={{ width: shellWidth, minWidth: shellMinWidth, maxWidth: shellMaxWidth }}>
-        {/* Quick chips */}
-        <div className="bber-chips">
-          {quickChips.map((c) => (
-            <button key={c.label} className="bber-chip" type="button" onClick={() => onPickChip(c.q)} disabled={sending}>
-              {c.label}
-            </button>
-          ))}
-        </div>
+          --bber-card: rgba(255, 255, 255, 0.92);
+          --bber-text: #0f172a;
+          --bber-muted: rgba(15, 23, 42, 0.65);
+          --bber-border: rgba(15, 23, 42, 0.12);
 
-        {/* Chat box */}
-        <div className="bber-card">
-          <div className="bber-chat">
-            {messages.map((m) => (
-              <div key={m.id} className={`bber-msg-row ${m.role === "user" ? "right" : "left"}`}>
-                <div className={`bber-msg ${m.role === "user" ? "user" : "bot"}`}>
-                  {m.role === "bot" && (
-                    <div className="bber-badge">
-                      Bber <span className="bber-badge-mode">({m.meta?.mode ?? "faq"})</span>
-                    </div>
-                  )}
-                  <div className="bber-text">{m.text}</div>
-
-                  {m.role === "bot" && (m.meta?.nhom || typeof m.meta?.score === "number") && (
-                    <div className="bber-meta">
-                      {m.meta?.nhom ? <span>Nhóm: {m.meta.nhom}</span> : null}
-                      {typeof m.meta?.score === "number" ? <span> · Score: {m.meta.score.toFixed(3)}</span> : null}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-
-            {sending && (
-              <div className="bber-msg-row left">
-                <div className="bber-msg bot">
-                  <div className="bber-badge">
-                    Bber <span className="bber-badge-mode">(đang trả lời)</span>
-                  </div>
-                  <div className="bber-text">…</div>
-                </div>
-              </div>
-            )}
-
-            <div ref={endRef} />
-          </div>
-
-          {/* Suggestions */}
-          {showSuggest && suggestions.length > 0 && (
-            <div className="bber-suggest">
-              {suggestions.map((s) => (
-                <button key={s.id} className="bber-suggest-item" type="button" onClick={() => onPickSuggestion(s)} disabled={sending}>
-                  <div className="bber-sq">{s.cau_hoi}</div>
-                  <div className="bber-smeta">
-                    {s.nhom ? <span>{s.nhom}</span> : <span>&nbsp;</span>}
-                    {typeof s.score === "number" ? <span> · {s.score.toFixed(3)}</span> : null}
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Input */}
-          <form className="bber-inputbar" onSubmit={onSubmit}>
-            <input
-              ref={inputRef}
-              className="bber-input"
-              placeholder="Nhập câu hỏi của bạn..."
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onFocus={() => setShowSuggest(true)}
-              disabled={sending}
-              autoComplete="off"
-            />
-            <button className="bber-send" type="submit" disabled={sending || !normalizeQ(input)}>
-              Gửi
-            </button>
-          </form>
-
-          <div className="bber-hint">Nhấn Enter để hỏi • Click gợi ý để trả lời nhanh</div>
-        </div>
-      </div>
-
-      <style jsx>{`
-        /* Background: đồng bộ tone xanh logo */
-        .bber-bg {
-          min-height: 100vh;
-          padding: 18px 14px 30px;
-          background: radial-gradient(1200px 700px at 25% 10%, rgba(140, 220, 255, 0.75), rgba(255, 255, 255, 0) 55%),
-            radial-gradient(900px 600px at 70% 20%, rgba(120, 200, 255, 0.55), rgba(255, 255, 255, 0) 60%),
-            linear-gradient(180deg, rgba(210, 245, 255, 0.65), rgba(255, 255, 255, 0.95));
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          color: #0a2a3a;
+          --bber-bubble-user: rgba(10, 171, 232, 0.18);
+          --bber-bubble-bot: rgba(15, 23, 42, 0.06);
+          --bber-hit: rgba(255, 196, 0, 0.35);
         }
 
-        /* Top bar */
-        .bber-top {
+        html[data-theme="dark"] {
+          --bber-card: rgba(2, 6, 23, 0.62);
+          --bber-text: #e5e7eb;
+          --bber-muted: rgba(229, 231, 235, 0.65);
+          --bber-border: rgba(229, 231, 235, 0.18);
+          --bber-bubble-user: rgba(10, 171, 232, 0.28);
+          --bber-bubble-bot: rgba(229, 231, 235, 0.1);
+          --bber-hit: rgba(255, 196, 0, 0.25);
+        }
+
+        html,
+        body {
+          height: 100%;
+        }
+        body {
+          margin: 0;
+          font-family: Roboto, system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+          color: var(--bber-text);
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+        }
+
+        .bber-root {
+          min-height: 100dvh;
+          background: radial-gradient(1200px 650px at 20% 10%, var(--bber-bg2), transparent 55%),
+            radial-gradient(1200px 650px at 80% 20%, var(--bber-bg1), transparent 60%);
+          display: flex;
+          justify-content: center;
+          align-items: stretch;
+          padding: 10px;
+          box-sizing: border-box;
+        }
+
+        .bber-chatCard {
           width: 100%;
-          max-width: 1080px;
+          max-width: 1200px;
+          height: calc(100dvh - 20px);
+          background: var(--bber-card);
+          border: 1px solid var(--bber-border);
+          border-radius: 18px;
+          box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+          overflow: hidden;
+          backdrop-filter: blur(8px);
+          display: flex;
+          flex-direction: column;
+        }
+
+        .bber-header {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 12px;
-          margin-bottom: 14px;
+          padding: 12px;
+          border-bottom: 1px solid var(--bber-border);
+          gap: 10px;
         }
 
-        .bber-brand {
+        .bber-headLeft {
           display: flex;
           align-items: center;
-          gap: 12px;
+          gap: 10px;
+          min-width: 0;
         }
 
         .bber-logo {
-          width: 52px;
-          height: 52px;
-          border-radius: 14px;
-          background: rgba(255, 255, 255, 0.85);
-          border: 1px solid rgba(0, 80, 120, 0.14);
-          box-shadow: 0 10px 30px rgba(0, 60, 100, 0.12);
-          object-fit: cover;
+          width: 40px;
+          height: 40px;
+          border-radius: 12px;
+          object-fit: contain;
+          border: 1px solid var(--bber-border);
+          background: rgba(255, 255, 255, 0.75);
+          flex: 0 0 auto;
         }
 
         .bber-title {
-          font-size: 26px;
-          font-weight: 800;
-          letter-spacing: 0.2px;
+          font-weight: 900;
+          font-size: 18px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
 
         .bber-sub {
-          font-size: 14px;
-          opacity: 0.85;
-        }
-
-        .bber-actions {
-          display: flex;
-          gap: 8px;
-          flex-wrap: wrap;
-          justify-content: flex-end;
+          font-size: 12px;
+          color: var(--bber-muted);
+          font-weight: 700;
+          margin-top: 2px;
         }
 
         .bber-btn {
-          border: 1px solid rgba(0, 80, 120, 0.16);
-          background: rgba(255, 255, 255, 0.85);
-          color: #0a2a3a;
-          padding: 9px 12px;
+          border: 1px solid var(--bber-border);
+          background: rgba(255, 255, 255, 0.6);
+          color: var(--bber-text);
           border-radius: 12px;
-          cursor: pointer;
-          font-weight: 600;
-          box-shadow: 0 8px 22px rgba(0, 60, 100, 0.08);
-        }
-        .bber-btn:hover {
-          background: rgba(255, 255, 255, 0.95);
-        }
-        .bber-btn-ghost {
-          background: rgba(255, 255, 255, 0.55);
-        }
-
-        /* Shell responsive */
-        .bber-shell {
-          width: 100%;
-        }
-
-        .bber-chips {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          margin: 0 0 10px;
-        }
-
-        .bber-chip {
-          border: 1px solid rgba(0, 90, 140, 0.16);
-          background: rgba(255, 255, 255, 0.72);
           padding: 8px 10px;
-          border-radius: 999px;
+          font-weight: 900;
           cursor: pointer;
-          font-weight: 650;
-          font-size: 13px;
-        }
-        .bber-chip:hover {
-          background: rgba(255, 255, 255, 0.92);
-        }
-        .bber-chip:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
         }
 
-        /* Card */
-        .bber-card {
-          border-radius: 18px;
-          border: 1px solid rgba(0, 80, 120, 0.12);
-          background: rgba(255, 255, 255, 0.75);
-          box-shadow: 0 18px 40px rgba(0, 60, 100, 0.12);
-          overflow: hidden;
-          backdrop-filter: blur(10px);
+        html[data-theme="dark"] .bber-btn {
+          background: rgba(2, 6, 23, 0.35);
         }
 
-        /* Chat */
-        .bber-chat {
-          height: ${isClient ? (isMobile ? "calc(100vh - 270px)" : "560px") : "560px"};
-          min-height: ${isClient ? (isMobile ? "520px" : "560px") : "560px"};
+        .bber-body {
+          flex: 1;
           padding: 12px;
           overflow: auto;
-          border: 1px solid rgba(0, 80, 120, 0.12);
-          margin: 12px;
-          border-radius: 14px;
-          background: rgba(255, 255, 255, 0.55);
-        }
-
-        .bber-msg-row {
           display: flex;
-          margin: 10px 0;
-        }
-        .bber-msg-row.left {
-          justify-content: flex-start;
-        }
-        .bber-msg-row.right {
-          justify-content: flex-end;
+          flex-direction: column;
+          gap: 10px;
         }
 
-        .bber-msg {
-          max-width: 88%;
-          border-radius: 14px;
+        .bber-bubble {
+          max-width: min(920px, 92%);
+          border-radius: 16px;
           padding: 10px 12px;
-          border: 1px solid rgba(0, 80, 120, 0.12);
-          box-shadow: 0 10px 22px rgba(0, 60, 100, 0.06);
-          background: rgba(255, 255, 255, 0.86);
+          border: 1px solid var(--bber-border);
+          word-break: break-word;
+          line-height: 1.6;
+          font-size: 14px;
+          position: relative;
         }
 
-        .bber-msg.user {
-          background: rgba(210, 245, 255, 0.9);
-          border-color: rgba(0, 120, 170, 0.18);
+        .bber-bot {
+          align-self: flex-start;
+          background: var(--bber-bubble-bot);
         }
 
-        .bber-badge {
-          font-size: 13px;
-          font-weight: 800;
+        .bber-user {
+          align-self: flex-end;
+          background: var(--bber-bubble-user);
+          border-color: rgba(10, 171, 232, 0.35);
+        }
+
+        .bber-bubbleTop {
+          display: flex;
+          justify-content: flex-end;
+          gap: 8px;
           margin-bottom: 6px;
         }
-        .bber-badge-mode {
-          font-weight: 700;
-          opacity: 0.75;
-        }
 
-        .bber-text {
-          font-size: 16px;
-          line-height: 1.45;
-          white-space: pre-wrap;
-          word-break: break-word;
-        }
-
-        .bber-meta {
-          margin-top: 6px;
+        .bber-miniBtn {
+          border: 1px solid var(--bber-border);
+          background: rgba(255, 255, 255, 0.55);
+          color: var(--bber-text);
+          border-radius: 10px;
+          padding: 6px 8px;
+          font-weight: 900;
+          cursor: pointer;
           font-size: 12px;
-          opacity: 0.75;
+        }
+        html[data-theme="dark"] .bber-miniBtn {
+          background: rgba(2, 6, 23, 0.25);
         }
 
-        /* Suggest list */
-        .bber-suggest {
-          padding: 0 12px 10px;
+        .bber-secTitle {
+          font-weight: 900;
+          margin: 8px 0 6px;
+        }
+
+        .bber-paras {
           display: grid;
+          gap: 6px;
+        }
+        .bber-para {
+          white-space: pre-wrap;
+        }
+
+        .bber-ol {
+          margin: 0;
+          padding-left: 18px;
+          display: grid;
+          gap: 6px;
+        }
+
+        .bber-formula {
+          border: 1px dashed var(--bber-border);
+          border-radius: 12px;
+          padding: 10px;
+          background: rgba(255, 255, 255, 0.45);
+        }
+        html[data-theme="dark"] .bber-formula {
+          background: rgba(2, 6, 23, 0.25);
+        }
+        .bber-formulaLine {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+            monospace;
+          font-size: 13px;
+          white-space: pre-wrap;
+        }
+
+        .bber-example {
+          border-left: 4px solid rgba(10, 171, 232, 0.5);
+          padding-left: 10px;
+          display: grid;
+          gap: 6px;
+        }
+
+        .bber-files {
+          margin-top: 10px;
+          display: flex;
+          flex-direction: column;
           gap: 8px;
         }
 
-        .bber-suggest-item {
-          text-align: left;
-          border: 1px solid rgba(0, 90, 140, 0.14);
-          background: rgba(255, 255, 255, 0.72);
-          padding: 10px 12px;
-          border-radius: 12px;
-          cursor: pointer;
-        }
-        .bber-suggest-item:hover {
-          background: rgba(255, 255, 255, 0.92);
-        }
-        .bber-suggest-item:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-        .bber-sq {
-          font-weight: 700;
-          font-size: 14px;
-        }
-        .bber-smeta {
-          margin-top: 2px;
-          font-size: 12px;
-          opacity: 0.75;
+        .bber-fileTitle {
+          font-weight: 900;
         }
 
-        /* Input */
-        .bber-inputbar {
+        .bber-fileLink {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          width: fit-content;
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(10, 171, 232, 0.35);
+          background: rgba(10, 171, 232, 0.1);
+          text-decoration: none;
+          color: var(--bber-text);
+          font-weight: 900;
+        }
+
+        .bber-suggestWrap {
+          margin-top: 10px;
+        }
+        .bber-suggestTitle {
+          font-weight: 900;
+          margin-bottom: 6px;
+        }
+        .bber-suggestList {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .bber-suggestBtn {
+          padding: 7px 10px;
+          border-radius: 999px;
+          border: 1px solid rgba(10, 171, 232, 0.35);
+          background: rgba(10, 171, 232, 0.1);
+          cursor: pointer;
+          font-size: 13px;
+          font-weight: 900;
+          color: var(--bber-text);
+        }
+
+        .bber-footer {
+          border-top: 1px solid var(--bber-border);
+          padding: 10px;
+          display: grid;
+          gap: 10px;
+        }
+
+        .bber-modeRow {
           display: flex;
           gap: 10px;
-          padding: 12px;
+          flex-wrap: wrap;
+          justify-content: center;
+          align-items: center;
         }
+
+        .bber-modeBar {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          justify-content: center;
+        }
+
+        .bber-mode {
+          border: 1px solid var(--bber-border);
+          background: rgba(255, 255, 255, 0.55);
+          border-radius: 999px;
+          padding: 8px 12px;
+          cursor: pointer;
+          font-weight: 900;
+          font-size: 13px;
+        }
+        html[data-theme="dark"] .bber-mode {
+          background: rgba(2, 6, 23, 0.3);
+        }
+
+        .bber-modeActive {
+          border-color: rgba(10, 171, 232, 0.55);
+          box-shadow: 0 0 0 3px rgba(10, 171, 232, 0.12);
+        }
+
+        .bber-aiQuota {
+          font-size: 12px;
+          color: var(--bber-muted);
+          font-weight: 900;
+          padding: 6px 10px;
+          border: 1px dashed var(--bber-border);
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.45);
+        }
+        html[data-theme="dark"] .bber-aiQuota {
+          background: rgba(2, 6, 23, 0.25);
+        }
+
+        .bber-inputRow {
+          position: relative;
+          display: flex;
+          gap: 8px;
+          align-items: center;
+        }
+
         .bber-input {
           flex: 1;
+          padding: 12px;
           border-radius: 14px;
-          border: 1px solid rgba(0, 80, 120, 0.14);
-          padding: 12px 12px;
-          font-size: 16px;
-          background: rgba(255, 255, 255, 0.9);
+          border: 1px solid var(--bber-border);
           outline: none;
+          font-size: 14px;
+          background: rgba(255, 255, 255, 0.6);
+          color: var(--bber-text);
         }
-        .bber-input:focus {
-          border-color: rgba(0, 140, 200, 0.35);
-          box-shadow: 0 0 0 4px rgba(0, 160, 220, 0.12);
+
+        html[data-theme="dark"] .bber-input {
+          background: rgba(2, 6, 23, 0.3);
         }
 
         .bber-send {
+          padding: 12px 14px;
           border-radius: 14px;
-          border: 1px solid rgba(0, 120, 170, 0.22);
-          background: rgba(0, 140, 200, 0.16);
-          font-weight: 800;
-          padding: 0 16px;
+          border: none;
+          background: var(--bber-brand);
+          color: white;
+          font-weight: 900;
           cursor: pointer;
         }
-        .bber-send:hover {
-          background: rgba(0, 140, 200, 0.22);
-        }
-        .bber-send:disabled {
-          opacity: 0.45;
-          cursor: not-allowed;
+
+        .bber-clear {
+          padding: 12px 14px;
+          border-radius: 14px;
+          border: 1px solid var(--bber-border);
+          background: rgba(255, 255, 255, 0.75);
+          color: var(--bber-text);
+          font-weight: 900;
+          cursor: pointer;
         }
 
-        .bber-hint {
-          padding: 0 12px 12px;
-          font-size: 13px;
-          opacity: 0.78;
+        html[data-theme="dark"] .bber-clear {
+          background: rgba(2, 6, 23, 0.35);
         }
 
-        /* Mobile fine-tune */
-        @media (max-width: 768px) {
-          .bber-top {
-            max-width: 520px;
-          }
-          .bber-title {
-            font-size: 22px;
-          }
-          .bber-sub {
-            font-size: 13px;
-          }
-          .bber-actions {
-            gap: 6px;
-          }
-          .bber-btn {
-            padding: 8px 10px;
-            border-radius: 12px;
-          }
+        .bber-mic {
+          padding: 10px 12px;
+          border-radius: 14px;
+          border: 1px solid var(--bber-border);
+          background: rgba(255, 255, 255, 0.55);
+          cursor: pointer;
+          font-weight: 900;
+        }
+
+        html[data-theme="dark"] .bber-mic {
+          background: rgba(2, 6, 23, 0.3);
+        }
+
+        .bber-micOn {
+          box-shadow: 0 0 0 3px rgba(14, 163, 86, 0.2);
+          border-color: rgba(14, 163, 86, 0.45);
+        }
+
+        .bber-auto {
+          position: absolute;
+          left: 0;
+          right: 0;
+          bottom: 54px;
+          background: var(--bber-card);
+          border: 1px solid rgba(10, 171, 232, 0.35);
+          border-radius: 14px;
+          padding: 10px;
+          box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
+          z-index: 50;
+        }
+
+        .bber-autoTitle {
+          font-weight: 900;
+          margin-bottom: 8px;
+        }
+
+        .bber-autoGrid {
+          display: grid;
+          gap: 6px;
+        }
+
+        .bber-autoItem {
+          text-align: left;
+          padding: 10px;
+          border-radius: 12px;
+          border: 1px solid var(--bber-border);
+          background: rgba(255, 255, 255, 0.55);
+          cursor: pointer;
+          font-weight: 900;
+        }
+
+        html[data-theme="dark"] .bber-autoItem {
+          background: rgba(2, 6, 23, 0.25);
+        }
+
+        .bber-autoMeta {
+          margin-top: 4px;
+          font-size: 12px;
+          color: var(--bber-muted);
+          font-weight: 700;
+        }
+
+        .bber-hit {
+          background: var(--bber-hit);
+          padding: 0 2px;
+          border-radius: 4px;
         }
       `}</style>
+
+      <div className="bber-chatCard">
+        <div className="bber-header">
+          <div className="bber-headLeft">
+            <img
+              className="bber-logo"
+              src={LOGO_SRC}
+              alt="Bber"
+              onError={(e) => {
+                (e.currentTarget as any).src = "/logo.png";
+              }}
+            />
+            <div>
+              <div className="bber-title">Bber – Trợ lý ảo cho HSSV</div>
+              <div className="bber-sub">Chế độ hiện tại: {labelOf(scope)}</div>
+            </div>
+          </div>
+
+          <button className="bber-btn" onClick={toggleTheme}>
+            {theme === "dark" ? "🌙 Dark" : "☀️ Light"}
+          </button>
+        </div>
+
+        <div ref={listRef} className="bber-body">
+          {messages.map((m, i) => {
+            const canCopy = m.role === "assistant";
+            const isAI = m.role === "assistant" && (m.scope === "gemini" || m.scope === "groq");
+            const copyText = () => {
+              const files = (m.attachments || [])
+                .map((f) => `- ${f.name}: ${f.url || ""}`)
+                .filter(Boolean)
+                .join("\n");
+              const full = files ? `${m.text}\n\nTệp đính kèm:\n${files}` : m.text;
+              copyToClipboard(full);
+            };
+
+            return (
+              <div key={i} className={`bber-bubble ${m.role === "user" ? "bber-user" : "bber-bot"}`}>
+                {canCopy && (
+                  <div className="bber-bubbleTop">
+                    <button className="bber-miniBtn" onClick={copyText} title="Copy nội dung">
+                      Copy
+                    </button>
+                  </div>
+                )}
+
+                {m.role === "assistant" && m.scope === "internal" && hasStructured(m.text) ? (
+                  <>
+                    {parseStructured(m.text).map((sec, idx) => (
+                      <div key={idx}>
+                        <div className="bber-secTitle">{sec.title}:</div>
+                        {renderSection(sec)}
+                      </div>
+                    ))}
+                  </>
+                ) : m.role === "assistant" && isAI ? (
+                  <CollapsibleText text={m.text} maxChars={900} />
+                ) : (
+                  <div style={{ whiteSpace: "pre-wrap" }}>{m.text}</div>
+                )}
+
+                {m.attachments?.length ? (
+                  <div className="bber-files">
+                    <div className="bber-fileTitle">Tải file đính kèm:</div>
+                    {m.attachments.map((f) => (
+                      <a key={f.path} className="bber-fileLink" href={f.url} target="_blank" rel="noreferrer">
+                        ⬇ Tải: {f.name}
+                      </a>
+                    ))}
+                  </div>
+                ) : null}
+
+                {m.suggestions?.length ? (
+                  <div className="bber-suggestWrap">
+                    <div className="bber-suggestTitle">Gợi ý liên quan:</div>
+                    <div className="bber-suggestList">
+                      {m.suggestions.map((s) => (
+                        <button key={s.id} className="bber-suggestBtn" onClick={() => send(s.cau_hoi)}>
+                          {s.cau_hoi}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+
+          {loading && <div className="bber-bubble bber-bot">{loadingText}</div>}
+        </div>
+
+        <div className="bber-footer">
+          {/* mode bar nằm ngay trên dòng nhập */}
+          <div className="bber-modeRow">
+            <div className="bber-modeBar">
+              {(["internal", "gemini", "groq"] as Scope[]).map((k) => (
+                <button
+                  key={k}
+                  className={`bber-mode ${scope === k ? "bber-modeActive" : ""}`}
+                  onClick={() => {
+                    setScope(k);
+                    setTypingOpen(false);
+                    setTypingItems([]);
+                  }}
+                  title={labelOf(k)}
+                >
+                  {labelOf(k)}
+                </button>
+              ))}
+            </div>
+
+            {scope !== "internal" && <div className="bber-aiQuota">AI còn lại: {aiRemaining}/5</div>}
+          </div>
+
+          <div className="bber-inputRow">
+            {speechSupported ? (
+              <button
+                className={`bber-mic ${listening ? "bber-micOn" : ""}`}
+                onClick={toggleVoice}
+                title={listening ? "Đang nghe… bấm để dừng" : "Bấm để nói"}
+              >
+                {listening ? "🎙️…" : "🎙️"}
+              </button>
+            ) : (
+              <button className="bber-mic" disabled title="Trình duyệt không hỗ trợ nhập giọng nói">
+                🎙️
+              </button>
+            )}
+
+            <input
+              className="bber-input"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={placeholder}
+              onKeyDown={(e) => e.key === "Enter" && send()}
+              onFocus={() => {
+                if (typingItems.length > 0 && scope === "internal") setTypingOpen(true);
+              }}
+            />
+
+            <button className="bber-send" onClick={() => send()} disabled={loading}>
+              Gửi
+            </button>
+
+            <button className="bber-clear" onClick={clearChat} title="Xoá toàn bộ nội dung chat">
+              Xoá
+            </button>
+
+            {scope === "internal" && typingOpen && typingItems.length > 0 && (
+              <div className="bber-auto">
+                <div className="bber-autoTitle">Gợi ý câu hỏi</div>
+                <div className="bber-autoGrid">
+                  {typingItems.map((s) => (
+                    <button key={s.id} className="bber-autoItem" onClick={() => send(s.cau_hoi)}>
+                      <div>
+                        {highlightParts(s.cau_hoi, input).map((p, idx) =>
+                          p.hit ? (
+                            <span key={idx} className="bber-hit">
+                              {p.t}
+                            </span>
+                          ) : (
+                            <span key={idx}>{p.t}</span>
+                          )
+                        )}
+                      </div>
+                      {s.nhom ? <div className="bber-autoMeta">Nhóm: {s.nhom}</div> : null}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
