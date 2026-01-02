@@ -64,6 +64,12 @@ function labelOf(scope: Scope) {
   return "Groq AI";
 }
 
+function labelShortOf(scope: Scope) {
+  if (scope === "internal") return "Nội bộ";
+  return labelOf(scope);
+}
+
+
 const HEADER_RE =
   /^\s*(Tiêu đề|Các bước|Nội dung|Công thức\/Ký hiệu|Ví dụ minh hoạ|Ví dụ minh họa)\s*:/im;
 
@@ -667,7 +673,7 @@ export default function Page() {
           display: flex;
           gap: 10px;
           flex-wrap: wrap;
-          justify-content: center;
+          justify-content: flex-start;
           align-items: center;
         }
 
@@ -680,18 +686,25 @@ export default function Page() {
         .bber-modeBar {
           display: flex;
           gap: 8px;
-          flex-wrap: wrap;
-          justify-content: center;
+          flex-wrap: nowrap;
+          flex: 1;
+          min-width: 0;
+          align-items: center;
         }
 
         .bber-mode {
           border: 1px solid var(--bber-border);
           background: rgba(255, 255, 255, 0.55);
           border-radius: 999px;
-          padding: 8px 12px;
+          padding: 8px 10px;
           cursor: pointer;
           font-weight: 900;
           font-size: 13px;
+          flex: 1 1 0;
+          min-width: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
         }
         html[data-theme="dark"] .bber-mode {
           background: rgba(2, 6, 23, 0.3);
@@ -879,6 +892,28 @@ export default function Page() {
   .bber-input { min-width: 0; padding: 10px 12px; font-size: 14px; }
   .bber-inputBottom { display: flex; gap: 8px; }
   .bber-send, .bber-clear { flex: 1; padding: 10px 12px; border-radius: 12px; font-weight: 900; min-width: 0; }
+
+  /* === Mobile fix: keep 3 mode buttons on ONE row without overlap === */
+  .bber-modeLabel { display: none; }
+
+  .bber-modeBar {
+    width: 100%;
+    gap: 6px;
+  }
+
+  .bber-mode {
+    padding: 7px 6px;
+    font-size: 12px;
+  }
+
+  .bber-modeTextLong { display: none; }
+  .bber-modeTextShort { display: inline-block; }
+
+  /* If quota shows, push it to next line */
+  .bber-aiQuota {
+    flex: 0 0 100%;
+    text-align: center;
+  }
 }
 
   .bber-bubble { max-width: 100%; }
@@ -1003,7 +1038,8 @@ export default function Page() {
                   }}
                   title={labelOf(k)}
                 >
-                  {labelOf(k)}
+                  <span className="bber-modeTextLong">{labelOf(k)}</span>
+                  <span className="bber-modeTextShort">{labelShortOf(k)}</span>
                 </button>
               ))}
             </div>
