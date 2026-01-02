@@ -865,25 +865,36 @@ export default function Page() {
   .bber-title { font-size: 17px; }
   .bber-btn { padding: 8px 10px; border-radius: 12px; font-size: 12px; font-weight: 800; }
 
-  /* Mode bar: one row (scroll if needed) */
+  /* Mode bar: Tra cứu + 3 nút 1 hàng, không scroll */
   .bber-modeRow {
     display: flex;
     flex-wrap: nowrap;
     align-items: center;
     justify-content: flex-start;
-    gap: 8px;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: 2px;
+    gap: 6px;
+    overflow: hidden;
   }
-  .bber-modeBar { display: flex; flex-wrap: nowrap; gap: 8px; }
-  .bber-modeLabel { flex: 0 0 auto; font-size: 13px; font-weight: 900; white-space: nowrap; }
-  .bber-mode {
+  .bber-modeLabel {
     flex: 0 0 auto;
-    padding: 8px 10px;
     font-size: 13px;
     font-weight: 900;
     white-space: nowrap;
+  }
+  .bber-modeBar {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    gap: 6px;
+  }
+  .bber-mode {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 8px 6px;
+    font-size: 13px;
+    font-weight: 900;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* Composer: mic + input on same row */
