@@ -427,7 +427,7 @@ export default function Page() {
         }
         body {
           margin: 0;
-          font-family: Roboto, system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+          font-family: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
           color: var(--bber-text);
           -webkit-font-smoothing: antialiased;
           -moz-osx-font-smoothing: grayscale;
@@ -822,7 +822,26 @@ export default function Page() {
           padding: 0 2px;
           border-radius: 4px;
         }
-      `}</style>
+      
+
+/* Mobile responsive tuning */
+@media (max-width: 480px) {
+  .bber-body { padding: 10px; }
+  .bber-bubble { max-width: 100%; }
+
+  .bber-title { font-size: 17px; }
+  .bber-btn { padding: 8px 10px; border-radius: 12px; font-size: 12px; font-weight: 800; }
+
+  .bber-modeRow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .bber-mode { width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.15; text-align: center; font-weight: 800; white-space: normal; }
+  .bber-modeRow .bber-mode:nth-child(3) { grid-column: 1 / -1; }
+
+  .bber-inputRow { flex-wrap: wrap; gap: 8px; }
+  .bber-mic { padding: 8px 10px; border-radius: 12px; }
+
+  .bber-input { flex-basis: 100%; padding: 10px 12px; font-size: 14px; }
+  .bber-send, .bber-clear { flex: 1 1 calc(50% - 4px); padding: 10px 12px; border-radius: 12px; font-weight: 800; min-width: 0; }
+}`}</style>
 
       <div className="bber-chatCard">
         <div className="bber-header">
@@ -848,7 +867,7 @@ export default function Page() {
 
         <div ref={listRef} className="bber-body">
           {messages.map((m, i) => {
-            const canCopy = m.role === "assistant";
+            const canCopy = m.role === "assistant" && i > 0;
             const isAI = m.role === "assistant" && (m.scope === "gemini" || m.scope === "groq");
             const copyText = () => {
               const files = (m.attachments || [])
