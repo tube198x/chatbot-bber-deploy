@@ -1,0 +1,14 @@
+{
+  "redirects": [
+    {
+      "source": "/b",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/ad",
+      "destination": "/admin/login",
+      "permanent": true
+    }
+  ]
+}
