@@ -15,7 +15,7 @@ type Msg = {
 };
 
 const LOGO_SRC = "/logo.ico";
-const INTERNAL_PLACEHOLDER = "Gõ 2 ký tự trở lên để hiện gợi ý (Tra cứu nội bộ Trường).";
+const INTERNAL_PLACEHOLDER = "Gõ 2 ký tự trở lên để gợi ý tra cứu ở Trường";
 
 function safeTrim(s: any) {
   return String(s ?? "").trim();
@@ -59,9 +59,9 @@ async function readJsonOrText(res: Response): Promise<{ json?: any; text?: strin
 }
 
 function labelOf(scope: Scope) {
-  if (scope === "internal") return "Tra cứu nội bộ Trường";
-  if (scope === "gemini") return "Tra cứu AI (Tổng hợp)";
-  return "Tra cứu AI (Nhanh)";
+  if (scope === "internal") return "Nội bộ Trường";
+  if (scope === "gemini") return "Gemini AI";
+  return "Groq AI";
 }
 
 const HEADER_RE =
@@ -671,6 +671,12 @@ export default function Page() {
           align-items: center;
         }
 
+        .bber-modeLabel {
+          font-weight: 900;
+          color: var(--bber-text);
+          white-space: nowrap;
+        }
+
         .bber-modeBar {
           display: flex;
           gap: 8px;
@@ -711,6 +717,20 @@ export default function Page() {
 
         .bber-inputRow {
           position: relative;
+          display: flex;
+          gap: 8px;
+          align-items: center;
+        }
+
+        .bber-inputTop {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          flex: 1;
+          min-width: 0;
+        }
+
+        .bber-inputBottom {
           display: flex;
           gap: 8px;
           align-items: center;
@@ -832,6 +852,40 @@ export default function Page() {
   .bber-title { font-size: 17px; }
   .bber-btn { padding: 8px 10px; border-radius: 12px; font-size: 12px; font-weight: 800; }
 
+  /* Mode bar: one row (scroll if needed) */
+  .bber-modeRow {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 2px;
+  }
+  .bber-modeBar { display: flex; flex-wrap: nowrap; gap: 8px; }
+  .bber-modeLabel { flex: 0 0 auto; font-size: 13px; font-weight: 900; white-space: nowrap; }
+  .bber-mode {
+    flex: 0 0 auto;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-weight: 900;
+    white-space: nowrap;
+  }
+
+  /* Composer: mic + input on same row */
+  .bber-inputRow { flex-direction: column; align-items: stretch; gap: 8px; }
+  .bber-inputTop { width: 100%; }
+  .bber-input { min-width: 0; padding: 10px 12px; font-size: 14px; }
+  .bber-inputBottom { display: flex; gap: 8px; }
+  .bber-send, .bber-clear { flex: 1; padding: 10px 12px; border-radius: 12px; font-weight: 900; min-width: 0; }
+}
+
+  .bber-bubble { max-width: 100%; }
+
+  .bber-title { font-size: 17px; }
+  .bber-btn { padding: 8px 10px; border-radius: 12px; font-size: 12px; font-weight: 800; }
+
   .bber-modeRow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .bber-mode { width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.15; text-align: center; font-weight: 800; white-space: normal; }
   .bber-modeRow .bber-mode:nth-child(3) { grid-column: 1 / -1; }
@@ -936,6 +990,7 @@ export default function Page() {
         <div className="bber-footer">
           {/* mode bar nằm ngay trên dòng nhập */}
           <div className="bber-modeRow">
+            <div className="bber-modeLabel">Tra cứu:</div>
             <div className="bber-modeBar">
               {(["internal", "gemini", "groq"] as Scope[]).map((k) => (
                 <button
@@ -956,41 +1011,45 @@ export default function Page() {
             {scope !== "internal" && <div className="bber-aiQuota">AI còn lại: {aiRemaining}/5</div>}
           </div>
 
-          <div className="bber-inputRow">
+                    <div className="bber-inputRow">
+            <div className="bber-inputTop">
             {speechSupported ? (
-              <button
-                className={`bber-mic ${listening ? "bber-micOn" : ""}`}
-                onClick={toggleVoice}
-                title={listening ? "Đang nghe… bấm để dừng" : "Bấm để nói"}
-              >
-                {listening ? "🎙️…" : "🎙️"}
-              </button>
-            ) : (
-              <button className="bber-mic" disabled title="Trình duyệt không hỗ trợ nhập giọng nói">
-                🎙️
-              </button>
-            )}
+                          <button
+                            className={`bber-mic ${listening ? "bber-micOn" : ""}`}
+                            onClick={toggleVoice}
+                            title={listening ? "Đang nghe… bấm để dừng" : "Bấm để nói"}
+                          >
+                            {listening ? "🎙️…" : "🎙️"}
+                          </button>
+                        ) : (
+                          <button className="bber-mic" disabled title="Trình duyệt không hỗ trợ nhập giọng nói">
+                            🎙️
+                          </button>
+                        )}
 
             <input
-              className="bber-input"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder={placeholder}
-              onKeyDown={(e) => e.key === "Enter" && send()}
-              onFocus={() => {
-                if (typingItems.length > 0 && scope === "internal") setTypingOpen(true);
-              }}
-            />
+                          className="bber-input"
+                          value={input}
+                          onChange={(e) => setInput(e.target.value)}
+                          placeholder={placeholder}
+                          onKeyDown={(e) => e.key === "Enter" && send()}
+                          onFocus={() => {
+                            if (typingItems.length > 0 && scope === "internal") setTypingOpen(true);
+                          }}
+                        />
+            </div>
 
+            <div className="bber-inputBottom">
             <button className="bber-send" onClick={() => send()} disabled={loading}>
-              Gửi
-            </button>
+                          Gửi
+                        </button>
 
             <button className="bber-clear" onClick={clearChat} title="Xoá toàn bộ nội dung chat">
-              Xoá
-            </button>
+                          Xoá
+                        </button>
+            </div>
 
-            {scope === "internal" && typingOpen && typingItems.length > 0 && (
+{scope === "internal" && typingOpen && typingItems.length > 0 && (
               <div className="bber-auto">
                 <div className="bber-autoTitle">Gợi ý câu hỏi</div>
                 <div className="bber-autoGrid">
